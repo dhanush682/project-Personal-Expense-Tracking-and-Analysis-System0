@@ -1,329 +1,699 @@
+from flask import Flask,request,redirect,url_for,render_template_string
+import mysql.connector
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from datetime import datetime
+import os
 
-from flask import Flask, request, redirect, url_for, render_template_string
-import sqlite3
+app=Flask(__name__)
 
-app = Flask(__name__)
-DB_NAME = "students.db"
+# MySQL Configuration
+DB_CONFIG={
+    "host":"localhost",
+    "user":"root",
+    "password":"YOUR_MYSQL_PASSWORD"
+}
 
-# 1. DATABASE CONNECTION
+# Create database and tables
+def setup_database():
+    con=mysql.connector.connect(**DB_CONFIG)
+    cur=con.cursor()
+    cur.execute("CREATE DATABASE IF NOT EXISTS expense_tracker")
+    cur.execute("USE expense_tracker")
 
-def get_db():
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-# 2. CREATE DATABASE TABLE
-
-def create_table():
-    conn = get_db()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS students(
-            student_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            age INTEGER NOT NULL,
-            course TEXT NOT NULL,
-            section TEXT NOT NULL,
-            mobile TEXT NOT NULL,
-            email TEXT NOT NULL
-        )
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS categories(
+        category_id INT AUTO_INCREMENT PRIMARY KEY,
+        category_name VARCHAR(50) UNIQUE NOT NULL
+    )
     """)
-    conn.commit()
-    conn.close()
 
-# 3. HTML DESIGN
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS expenses(
+        expense_id INT AUTO_INCREMENT PRIMARY KEY,
+        expense_date DATE NOT NULL,
+        category_id INT NOT NULL,
+        amount DECIMAL(12,2) NOT NULL,
+        description VARCHAR(255),
+        payment_method VARCHAR(50),
+        FOREIGN KEY(category_id) REFERENCES categories(category_id)
+    )
+    """)
 
-HTML = """
+    categories=[
+        "Food","Travel","Education","Shopping",
+        "Bills","Entertainment","Health","Other"
+    ]
+
+    for category in categories:
+        cur.execute(
+            "INSERT IGNORE INTO categories(category_name) VALUES(%s)",
+            (category,)
+        )
+
+    con.commit()
+    cur.close()
+    con.close()
+
+def get_connection():
+    return mysql.connector.connect(
+        **DB_CONFIG,
+        database="expense_tracker"
+    )
+
+def get_expenses(start_date=None,end_date=None,category=None):
+    con=get_connection()
+    query="""
+    SELECT e.expense_id,e.expense_date,c.category_name,
+           e.amount,e.description,e.payment_method
+    FROM expenses e
+    JOIN categories c ON e.category_id=c.category_id
+    WHERE 1=1
+    """
+    values=[]
+
+    if start_date:
+        query+=" AND e.expense_date >= %s"
+        values.append(start_date)
+
+    if end_date:
+        query+=" AND e.expense_date <= %s"
+        values.append(end_date)
+
+    if category:
+        query+=" AND c.category_name = %s"
+        values.append(category)
+
+    query+=" ORDER BY e.expense_date DESC,e.expense_id DESC"
+
+    cur=con.cursor()
+    cur.execute(query,tuple(values))
+    rows=cur.fetchall()
+    cur.close()
+    con.close()
+    return rows
+
+def get_categories():
+    con=get_connection()
+    cur=con.cursor()
+    cur.execute("SELECT category_name FROM categories ORDER BY category_name")
+    rows=cur.fetchall()
+    cur.close()
+    con.close()
+    return [row[0] for row in rows]
+
+def generate_charts():
+    os.makedirs("static",exist_ok=True)
+    rows=get_expenses()
+
+    if not rows:
+        for filename in ["category_pie.png","monthly_bar.png"]:
+            path=os.path.join("static",filename)
+            if os.path.exists(path):
+                os.remove(path)
+        return
+
+    df=pd.DataFrame(rows,columns=[
+        "id","date","category","amount","description","payment"
+    ])
+
+    df["amount"]=pd.to_numeric(df["amount"])
+    df["date"]=pd.to_datetime(df["date"])
+
+    # Category pie chart
+    category_totals=df.groupby("category")["amount"].sum()
+
+    plt.figure(figsize=(7,5))
+    plt.pie(
+        category_totals,
+        labels=category_totals.index,
+        autopct="%1.1f%%",
+        startangle=90
+    )
+    plt.title("Category-wise Expense Distribution")
+    plt.tight_layout()
+    plt.savefig("static/category_pie.png")
+    plt.close()
+
+    # Monthly bar chart
+    df["month"]=df["date"].dt.to_period("M").astype(str)
+    monthly_totals=df.groupby("month")["amount"].sum()
+
+    plt.figure(figsize=(8,5))
+    monthly_totals.plot(kind="bar")
+    plt.title("Monthly Expenses")
+    plt.xlabel("Month")
+    plt.ylabel("Amount")
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.savefig("static/monthly_bar.png")
+    plt.close()
+
+# HTML Interface
+HTML="""
 <!DOCTYPE html>
 <html>
 <head>
-<title>Student Database Management System</title>
+<title>Personal Expense Tracker</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-body {
-    font-family: Arial;
-    background: #e3f2fd;
-    margin: 0;
-    padding: 20px;
+body{
+    margin:0;
+    font-family:Arial,sans-serif;
+    background:#f1f5f9;
+    color:#1e293b;
 }
-h1 {
-    text-align: center;
-    color: #1565c0;
+header{
+    background:#1d4ed8;
+    color:white;
+    padding:25px;
+    text-align:center;
 }
-.container {
-    max-width: 1100px;
-    margin: auto;
-    background: white;
-    padding: 20px;
-    border-radius: 12px;
+.container{
+    max-width:1100px;
+    margin:25px auto;
+    padding:15px;
 }
-input {
-    padding: 10px;
-    margin: 5px;
-    border: 1px solid #aaa;
-    border-radius: 5px;
+.card{
+    background:white;
+    padding:20px;
+    margin-bottom:20px;
+    border-radius:12px;
+    box-shadow:0 3px 12px #0001;
 }
-button {
-    padding: 10px 15px;
-    background: #1565c0;
-    color: white;
-    border: none;
-    border-radius: 5px;
-    cursor: pointer;
+.grid{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+    gap:15px;
 }
-table {
-    width: 100%;
-    border-collapse: collapse;
-    margin-top: 20px;
+input,select,button{
+    box-sizing:border-box;
+    width:100%;
+    padding:11px;
+    margin:6px 0;
+    border:1px solid #cbd5e1;
+    border-radius:6px;
 }
-th, td {
-    padding: 10px;
-    border: 1px solid #ddd;
-    text-align: center;
+button,.btn{
+    background:#2563eb;
+    color:white;
+    border:0;
+    cursor:pointer;
+    text-decoration:none;
+    padding:10px;
+    border-radius:6px;
+    display:inline-block;
 }
-th {
-    background: #1565c0;
-    color: white;
+.delete{
+    background:#dc2626;
 }
-a {
-    text-decoration: none;
-    color: #1565c0;
+.edit{
+    background:#059669;
 }
-.delete {
-    color: red;
+table{
+    width:100%;
+    border-collapse:collapse;
+    background:white;
 }
-.message {
-    color: green;
-    text-align: center;
+th,td{
+    padding:11px;
+    text-align:left;
+    border-bottom:1px solid #e2e8f0;
+}
+th{
+    background:#dbeafe;
+}
+.table-wrap{
+    overflow-x:auto;
+}
+.stat{
+    font-size:25px;
+    font-weight:bold;
+    color:#2563eb;
+}
+.charts{
+    display:grid;
+    grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
+    gap:20px;
+}
+.charts img{
+    width:100%;
+}
+.error{
+    background:#fee2e2;
+    padding:12px;
+    border-radius:6px;
+}
+@media(max-width:600px){
+    header{padding:15px}
+    .container{padding:10px}
 }
 </style>
 </head>
 <body>
+
+<header>
+<h1>Personal Expense Tracker</h1>
+<p>Track spending. Understand your expenses. Plan better.</p>
+</header>
+
 <div class="container">
-<h1>Student Database Management System</h1>
 
-<h2>{{ 'Update Student' if student else 'Add Student' }}</h2>
-
-<form method="POST" action="{{ url_for('update', sid=student['student_id']) if student else url_for('add') }}">
-<input name="name" placeholder="Student Name" required value="{{ student['name'] if student else '' }}">
-<input name="age" type="number" min="1" max="99" placeholder="Age" required value="{{ student['age'] if student else '' }}">
-<input name="course" placeholder="Course" required value="{{ student['course'] if student else '' }}">
-<input name="section" placeholder="Section" required value="{{ student['section'] if student else '' }}">
-<input name="mobile" placeholder="Mobile Number" pattern="[0-9]{10}" title="Enter 10 digits" required value="{{ student['mobile'] if student else '' }}">
-<input name="email" type="email" placeholder="Email" required value="{{ student['email'] if student else '' }}">
-<button type="submit">{{ 'Update Student' if student else 'Add Student' }}</button>
-{% if student %}
-<a href="{{ url_for('index') }}">Cancel</a>
-{% endif %}
-</form>
-
-<h2>Search Students</h2>
-<form method="GET" action="{{ url_for('index') }}">
-<input name="search" placeholder="Search by name, ID or course" value="{{ search }}">
-<button type="submit">Search</button>
-<a href="{{ url_for('index') }}">Show All</a>
-</form>
-
-<h2>Student Records ({{ students|length }})</h2>
 {% if message %}
-<p class="message">{{ message }}</p>
+<div class="card">{{message}}</div>
 {% endif %}
 
+<div class="grid">
+<div class="card">
+<h3>Total Expenses</h3>
+<div class="stat">₹{{"%.2f"|format(total)}}</div>
+</div>
+<div class="card">
+<h3>This Month</h3>
+<div class="stat">₹{{"%.2f"|format(month_total)}}</div>
+</div>
+<div class="card">
+<h3>Total Records</h3>
+<div class="stat">{{count}}</div>
+</div>
+<div class="card">
+<h3>Highest Spending</h3>
+<div class="stat" style="font-size:19px">{{highest}}</div>
+</div>
+</div>
+
+<div class="card">
+<h2>{{"Edit Expense" if edit else "Add New Expense"}}</h2>
+
+<form method="POST" action="{{url_for('save_expense')}}">
+<input type="hidden" name="expense_id"
+value="{{edit[0] if edit else ''}}">
+
+<div class="grid">
+<div>
+<label>Date</label>
+<input type="date" name="expense_date"
+value="{{edit[1] if edit else today}}" required>
+</div>
+
+<div>
+<label>Category</label>
+<select name="category" required>
+{% for c in categories %}
+<option value="{{c}}"
+{% if edit and edit[2]==c %}selected{% endif %}>
+{{c}}
+</option>
+{% endfor %}
+</select>
+</div>
+
+<div>
+<label>Amount (₹)</label>
+<input type="number" name="amount" min="0.01"
+step="0.01"
+value="{{edit[3] if edit else ''}}" required>
+</div>
+
+<div>
+<label>Payment Method</label>
+<select name="payment_method" required>
+{% for p in ["Cash","UPI","Card","Net Banking","Other"] %}
+<option value="{{p}}"
+{% if edit and edit[5]==p %}selected{% endif %}>
+{{p}}
+</option>
+{% endfor %}
+</select>
+</div>
+</div>
+
+<label>Description</label>
+<input type="text" name="description"
+placeholder="Enter expense details"
+maxlength="255"
+value="{{edit[4] if edit else ''}}">
+
+<button type="submit">
+{{"Update Expense" if edit else "Add Expense"}}
+</button>
+
+{% if edit %}
+<a class="btn delete" href="{{url_for('home')}}">Cancel</a>
+{% endif %}
+</form>
+</div>
+
+<div class="card">
+<h2>Filter Expenses</h2>
+<form method="GET" action="/">
+<div class="grid">
+<div>
+<label>Start Date</label>
+<input type="date" name="start_date" value="{{start_date}}">
+</div>
+<div>
+<label>End Date</label>
+<input type="date" name="end_date" value="{{end_date}}">
+</div>
+<div>
+<label>Category</label>
+<select name="category">
+<option value="">All Categories</option>
+{% for c in categories %}
+<option value="{{c}}"
+{% if selected_category==c %}selected{% endif %}>
+{{c}}
+</option>
+{% endfor %}
+</select>
+</div>
+<div>
+<label>&nbsp;</label>
+<button type="submit">Apply Filters</button>
+<a class="btn" href="{{url_for('home')}}">Clear Filters</a>
+</div>
+</div>
+</form>
+</div>
+
+<div class="card">
+<h2>Expense Records</h2>
+<div class="table-wrap">
 <table>
 <tr>
 <th>ID</th>
-<th>Name</th>
-<th>Age</th>
-<th>Course</th>
-<th>Section</th>
-<th>Mobile</th>
-<th>Email</th>
+<th>Date</th>
+<th>Category</th>
+<th>Amount</th>
+<th>Description</th>
+<th>Payment</th>
 <th>Actions</th>
 </tr>
-{% for s in students %}
+
+{% for e in expenses %}
 <tr>
-<td>{{ s['student_id'] }}</td>
-<td>{{ s['name'] }}</td>
-<td>{{ s['age'] }}</td>
-<td>{{ s['course'] }}</td>
-<td>{{ s['section'] }}</td>
-<td>{{ s['mobile'] }}</td>
-<td>{{ s['email'] }}</td>
+<td>{{e[0]}}</td>
+<td>{{e[1]}}</td>
+<td>{{e[2]}}</td>
+<td>₹{{"%.2f"|format(e[3]|float)}}</td>
+<td>{{e[4] or "-"}}</td>
+<td>{{e[5]}}</td>
 <td>
-<a href="{{ url_for('edit', sid=s['student_id']) }}">Edit</a> |
-<a class="delete" href="{{ url_for('delete', sid=s['student_id']) }}" onclick="return confirm('Delete this student?')">Delete</a>
+<a class="btn edit"
+href="{{url_for('home',edit_id=e[0])}}">Edit</a>
+<form method="POST"
+action="{{url_for('delete_expense',expense_id=e[0])}}"
+onsubmit="return confirm('Delete this expense?')">
+<button class="delete" type="submit">Delete</button>
+</form>
 </td>
 </tr>
-{% else %}
-<tr><td colspan="8">No student records found.</td></tr>
+{% endfor %}
+
+{% if not expenses %}
+<tr><td colspan="7">No expenses found.</td></tr>
+{% endif %}
+</table>
+</div>
+
+<h3>Filtered Total: ₹{{"%.2f"|format(filtered_total)}}</h3>
+</div>
+
+<div class="card">
+<h2>Category-wise Analysis</h2>
+<div class="table-wrap">
+<table>
+<tr><th>Category</th><th>Total Spending</th><th>Share</th></tr>
+{% for c in analysis %}
+<tr>
+<td>{{c[0]}}</td>
+<td>₹{{"%.2f"|format(c[1])}}</td>
+<td>{{"%.1f"|format(c[2])}}%</td>
+</tr>
 {% endfor %}
 </table>
+</div>
+</div>
+
+<div class="card">
+<h2>Expense Charts</h2>
+<div class="charts">
+<div>
+<h3>Category Pie Chart</h3>
+{% if chart_exists %}
+<img src="{{url_for('static',filename='category_pie.png')}}?v={{chart_version}}">
+{% else %}
+<p>Add an expense to generate the chart.</p>
+{% endif %}
+</div>
+<div>
+<h3>Monthly Bar Chart</h3>
+{% if chart_exists %}
+<img src="{{url_for('static',filename='monthly_bar.png')}}?v={{chart_version}}">
+{% else %}
+<p>Add an expense to generate the chart.</p>
+{% endif %}
+</div>
+</div>
+</div>
+
+<div class="card">
+<h2>Monthly Expense Report</h2>
+<form method="GET" action="/">
+<label>Select Month</label>
+<input type="month" name="report_month" value="{{report_month}}">
+<button type="submit">Generate Report</button>
+</form>
+<h3>Report for {{report_month}}</h3>
+<p>Total: <b>₹{{"%.2f"|format(report_total)}}</b></p>
+<p>Number of records: <b>{{report_count}}</b></p>
+{% for c in report_categories %}
+<p>{{c[0]}}: ₹{{"%.2f"|format(c[1])}}</p>
+{% endfor %}
+</div>
+
 </div>
 </body>
 </html>
 """
 
-# 4. DISPLAY AND SEARCH STUDENTS
-
 @app.route("/")
-def index():
-    search = request.args.get("search", "").strip()
-    message = request.args.get("message", "")
-    conn = get_db()
-
-    if search:
-        if search.isdigit():
-            students = conn.execute("""
-                SELECT * FROM students
-                WHERE name LIKE ? OR course LIKE ? OR student_id = ?
-                ORDER BY student_id
-            """, ('%' + search + '%', '%' + search + '%', int(search))).fetchall()
-        else:
-            students = conn.execute("""
-                SELECT * FROM students
-                WHERE name LIKE ? OR course LIKE ? OR section LIKE ?
-                ORDER BY student_id
-            """, ('%' + search + '%', '%' + search + '%', '%' + search + '%')).fetchall()
-    else:
-        students = conn.execute(
-            "SELECT * FROM students ORDER BY student_id"
-        ).fetchall()
-
-    conn.close()
-    return render_template_string(
-        HTML,
-        students=students,
-        student=None,
-        search=search,
-        message=message
-    )
-
-# 5. ADD STUDENT
-
-@app.route("/add", methods=["POST"])
-def add():
-    name = request.form.get("name", "").strip()
-    age = request.form.get("age", "").strip()
-    course = request.form.get("course", "").strip()
-    section = request.form.get("section", "").strip()
-    mobile = request.form.get("mobile", "").strip()
-    email = request.form.get("email", "").strip()
-
-    if not all([name, age, course, section, mobile, email]):
-        return "All fields are required.", 400
-
+def home():
     try:
-        age_value = int(age)
-        if age_value < 1 or age_value > 99:
-            return "Age must be between 1 and 99.", 400
+        today=datetime.today().strftime("%Y-%m-%d")
+        current_month=datetime.today().strftime("%Y-%m")
 
-        if len(mobile) != 10 or not mobile.isdigit():
-            return "Mobile number must contain 10 digits.", 400
+        start_date=request.args.get("start_date","")
+        end_date=request.args.get("end_date","")
+        selected_category=request.args.get("category","")
+        report_month=request.args.get("report_month",current_month)
+        edit_id=request.args.get("edit_id","")
 
-        conn = get_db()
-        conn.execute("""
-            INSERT INTO students(name, age, course, section, mobile, email)
-            VALUES(?, ?, ?, ?, ?, ?)
-        """, (name, age_value, course, section, mobile, email))
-        conn.commit()
-        conn.close()
-        return redirect(url_for("index", message="Student added successfully!"))
-    except ValueError:
-        return "Please enter a valid age.", 400
-    except sqlite3.Error:
-        return "Database error while adding student.", 500
+        if start_date and end_date and start_date>end_date:
+            return "Error: Start date cannot be after end date.",400
 
-# 6. OPEN EDIT FORM
+        # All expense records
+        all_rows=get_expenses()
 
-@app.route("/edit/<int:sid>")
-def edit(sid):
-    conn = get_db()
-    student = conn.execute(
-        "SELECT * FROM students WHERE student_id = ?", (sid,)
-    ).fetchone()
-
-    if student is None:
-        conn.close()
-        return "Student not found.", 404
-
-    students = conn.execute(
-        "SELECT * FROM students ORDER BY student_id"
-    ).fetchall()
-    conn.close()
-
-    return render_template_string(
-        HTML,
-        students=students,
-        student=student,
-        search="",
-        message=""
-    )
-
-# 7. UPDATE STUDENT
-
-@app.route("/update/<int:sid>", methods=["POST"])
-def update(sid):
-    name = request.form.get("name", "").strip()
-    age = request.form.get("age", "").strip()
-    course = request.form.get("course", "").strip()
-    section = request.form.get("section", "").strip()
-    mobile = request.form.get("mobile", "").strip()
-    email = request.form.get("email", "").strip()
-
-    if not all([name, age, course, section, mobile, email]):
-        return "All fields are required.", 400
-
-    try:
-        age_value = int(age)
-        if age_value < 1 or age_value > 99:
-            return "Age must be between 1 and 99.", 400
-
-        if len(mobile) != 10 or not mobile.isdigit():
-            return "Mobile number must contain 10 digits.", 400
-
-        conn = get_db()
-        result = conn.execute("""
-            UPDATE students
-            SET name=?, age=?, course=?, section=?, mobile=?, email=?
-            WHERE student_id=?
-        """, (name, age_value, course, section, mobile, email, sid))
-
-        conn.commit()
-        conn.close()
-
-        if result.rowcount == 0:
-            return "Student not found.", 404
-
-        return redirect(url_for("index", message="Student updated successfully!"))
-    except ValueError:
-        return "Please enter a valid age.", 400
-    except sqlite3.Error:
-        return "Database error while updating student.", 500
-
-# 8. DELETE STUDENT
-
-@app.route("/delete/<int:sid>")
-def delete(sid):
-    conn = get_db()
-    conn.execute("DELETE FROM students WHERE student_id = ?", (sid,))
-    conn.commit()
-    conn.close()
-    return redirect(url_for("index", message="Student deleted successfully!"))
-
-def init_db():
-    conn = sqlite3.connect("students.db")  # use the same DB path your app uses
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS students (
-            student_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL
-            -- add the other columns your app uses
+        # Filtered records
+        expenses=get_expenses(
+            start_date or None,
+            end_date or None,
+            selected_category or None
         )
-    """)
-    conn.commit()
-    conn.close()
 
-init_db()
-# 9. START APPLICATION
+        total=float(sum(float(e[3]) for e in all_rows))
+        filtered_total=float(sum(float(e[3]) for e in expenses))
 
-if __name__ == "__main__":
-    create_table()
-    app.run(debug=True)
+        month_rows=[
+            e for e in all_rows
+            if str(e[1])[:7]==current_month
+        ]
+        month_total=float(sum(float(e[3]) for e in month_rows))
 
+        count=len(all_rows)
+
+        # Category analysis
+        category_totals={}
+        for e in all_rows:
+            category_totals[e[2]]=category_totals.get(e[2],0)+float(e[3])
+
+        analysis=[]
+        for name,amount in sorted(
+            category_totals.items(),
+            key=lambda item:item[1],
+            reverse=True
+        ):
+            share=(amount/total*100) if total else 0
+            analysis.append((name,amount,share))
+
+        highest=analysis[0][0] if analysis else "None"
+
+        # Monthly report
+        report_rows=[
+            e for e in all_rows
+            if str(e[1])[:7]==report_month
+        ]
+
+        report_total=float(sum(float(e[3]) for e in report_rows))
+        report_count=len(report_rows)
+        report_data={}
+
+        for e in report_rows:
+            report_data[e[2]]=report_data.get(e[2],0)+float(e[3])
+
+        report_categories=sorted(
+            report_data.items(),
+            key=lambda item:item[1],
+            reverse=True
+        )
+
+        # Optional edit record
+        edit=None
+        if edit_id:
+            con=get_connection()
+            cur=con.cursor()
+            cur.execute("""
+                SELECT e.expense_id,e.expense_date,c.category_name,
+                       e.amount,e.description,e.payment_method
+                FROM expenses e
+                JOIN categories c ON e.category_id=c.category_id
+                WHERE e.expense_id=%s
+            """,(edit_id,))
+            edit=cur.fetchone()
+            cur.close()
+            con.close()
+
+        generate_charts()
+
+        return render_template_string(
+            HTML,
+            expenses=expenses,
+            categories=get_categories(),
+            total=total,
+            month_total=month_total,
+            count=count,
+            highest=highest,
+            analysis=analysis,
+            today=today,
+            edit=edit,
+            start_date=start_date,
+            end_date=end_date,
+            selected_category=selected_category,
+            filtered_total=filtered_total,
+            report_month=report_month,
+            report_total=report_total,
+            report_count=report_count,
+            report_categories=report_categories,
+            chart_exists=bool(all_rows),
+            chart_version=datetime.now().timestamp(),
+            message=request.args.get("message","")
+        )
+
+    except mysql.connector.Error as e:
+        return (
+            "<h2>Database Error</h2>"
+            "<p>"+str(e)+"</p>"
+            "<p>Check your MySQL password and ensure MySQL Server is running.</p>",
+            500
+        )
+
+@app.route("/save",methods=["POST"])
+def save_expense():
+    try:
+        expense_id=request.form.get("expense_id","").strip()
+        expense_date=request.form.get("expense_date","").strip()
+        category=request.form.get("category","").strip()
+        description=request.form.get("description","").strip()
+        payment_method=request.form.get("payment_method","").strip()
+
+        try:
+            amount=float(request.form.get("amount",""))
+            parsed_date=datetime.strptime(expense_date,"%Y-%m-%d")
+        except (ValueError,TypeError):
+            return "Invalid amount or date.",400
+
+        if not np.isfinite(amount) or amount<=0:
+            return "Amount must be a positive number.",400
+
+        if not category or not payment_method:
+            return "Category and payment method are required.",400
+
+        con=get_connection()
+        cur=con.cursor()
+
+        cur.execute(
+            "SELECT category_id FROM categories WHERE category_name=%s",
+            (category,)
+        )
+        result=cur.fetchone()
+
+        if not result:
+            cur.close()
+            con.close()
+            return "Invalid category.",400
+
+        category_id=result[0]
+
+        if expense_id:
+            cur.execute("""
+                UPDATE expenses
+                SET expense_date=%s,category_id=%s,amount=%s,
+                    description=%s,payment_method=%s
+                WHERE expense_id=%s
+            """,(
+                parsed_date.date(),category_id,amount,
+                description,payment_method,expense_id
+            ))
+        else:
+            cur.execute("""
+                INSERT INTO expenses(
+                    expense_date,category_id,amount,
+                    description,payment_method
+                )
+                VALUES(%s,%s,%s,%s,%s)
+            """,(
+                parsed_date.date(),category_id,amount,
+                description,payment_method
+            ))
+
+        con.commit()
+        cur.close()
+        con.close()
+
+        return redirect(url_for("home",message="Expense saved successfully!"))
+
+    except mysql.connector.Error as e:
+        return "Database Error: "+str(e),500
+
+@app.route("/delete/<int:expense_id>",methods=["POST"])
+def delete_expense(expense_id):
+    try:
+        con=get_connection()
+        cur=con.cursor()
+        cur.execute(
+            "DELETE FROM expenses WHERE expense_id=%s",
+            (expense_id,)
+        )
+        con.commit()
+        cur.close()
+        con.close()
+        return redirect(url_for("home",message="Expense deleted successfully!"))
+
+    except mysql.connector.Error as e:
+        return "Database Error: "+str(e),500
+
+if __name__=="__main__":
+    try:
+        setup_database()
+        print("Database initialized successfully.")
+        print("Open http://127.0.0.1:5000 in your browser.")
+        app.run(debug=False)
+    except mysql.connector.Error as e:
+        print("Could not connect to MySQL.")
+        print("Check your MySQL username, password and server.")
+        print("Details:",e)
